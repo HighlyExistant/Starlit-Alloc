@@ -4,7 +4,7 @@ use nightfall_core::{buffers::{BufferCreateInfo, BufferUsageFlags, MemoryPropert
 
 use crate::{FreeListArena, FreeListAllocator, GeneralAllocator, HostDeviceConversions, StackAllocator, StarlitAllocError};
 /// The GpuProgramState contains all memory related things.
-pub trait GpuProgramState {
+pub trait GpuAllocators {
     fn freelist(&self, usage: BufferUsageFlags, properties: MemoryPropertyFlags) -> Option<Arc<dyn GeneralAllocator>>;
 }
 #[repr(transparent)]
@@ -15,12 +15,12 @@ impl BufferUsageAndMemoryPropertyFlags {
         Self(usage.as_raw() as u64 | ((properties.as_raw() as u64) << 32))
     }
 }
-pub struct GpuAllocators {
+pub struct StandardAllocator {
     transfer: Arc<Queue>,
     freelists: Cell<HashMap<BufferUsageAndMemoryPropertyFlags, Arc<dyn GeneralAllocator>>>,
 }
 
-impl GpuAllocators {
+impl StandardAllocator {
     pub fn new(transfer: Arc<Queue>) -> Result<Arc<Self>, StarlitAllocError> {
         Ok(Arc::new(Self {
             transfer, 
@@ -31,7 +31,7 @@ impl GpuAllocators {
     }
 }
 
-impl GpuProgramState for GpuAllocators {
+impl GpuAllocators for StandardAllocator {
     fn freelist(&self, usage: BufferUsageFlags, properties: MemoryPropertyFlags) -> Option<Arc<dyn GeneralAllocator>> {
         let key = BufferUsageAndMemoryPropertyFlags::new(usage, properties);
         let freelists = unsafe { self.freelists.as_ptr().as_mut().unwrap() };

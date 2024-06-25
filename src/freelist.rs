@@ -317,7 +317,7 @@ impl HostDeviceConversions for FreeListArena {
 /// A Free List Allocator for Gpu Memory
 pub struct FreeListAllocator {
     device: Arc<LogicalDevice>,
-    chunks: Cell<Vec<FreeListArena>>,
+    arenas: Cell<Vec<FreeListArena>>,
     is_mappable: bool,
 }
 
@@ -328,7 +328,7 @@ impl TryFrom<Arc<Buffer>> for FreeListAllocator {
         Ok(Self { 
             device: value.device(),
             is_mappable: value.is_mappable(),
-            chunks: Cell::new(vec![freelist])
+            arenas: Cell::new(vec![freelist])
         })
     }
 }
@@ -369,19 +369,19 @@ impl FreeListAllocator {
         ).unwrap());
         Self::try_from(buffer)
     }
-    pub fn get_pointer_chunk(&self, allocation: NfPtr) -> Option<&FreeListArena>{
-        self.chunks().iter().find(|c|c.buffer.handle() == allocation.buffer())
+    pub fn get_pointer_arena(&self, allocation: NfPtr) -> Option<&FreeListArena>{
+        self.arenas().iter().find(|c|c.buffer.handle() == allocation.buffer())
     }
-    fn chunks(&self) -> &mut Vec<FreeListArena> {
-        let x = unsafe { self.chunks.as_ptr().as_mut().unwrap() };
+    fn arenas(&self) -> &mut Vec<FreeListArena> {
+        let x = unsafe { self.arenas.as_ptr().as_mut().unwrap() };
         x
     }
-    fn get_allocatable_chunk(&self, layout: Layout) -> Option<&FreeListArena> {
-        let chunks = self.chunks();
-        if let Some(freelist) = chunks.iter().find(|c|c.allocatable(layout)) {
+    fn get_allocatable_arena(&self, layout: Layout) -> Option<&FreeListArena> {
+        let arenas = self.arenas();
+        if let Some(freelist) = arenas.iter().find(|c|c.allocatable(layout)) {
             Some(freelist)
         } else {
-            let buffer = chunks[0].buffer.clone();
+            let buffer = arenas[0].buffer.clone();
             let info = BufferCreateInfo {
                 buffer_addressing: buffer.buffer_addressing_enabled(),
                 size: buffer.size(),
@@ -389,55 +389,55 @@ impl FreeListAllocator {
                 properties: buffer.properties(),
                 ..Default::default()
             };
-            let chunk = FreeListArena::new(self.device.clone(), info).ok()?;
+            let arena = FreeListArena::new(self.device.clone(), info).ok()?;
             unsafe {
-                self.chunks().push(chunk);
-                chunks.last()
+                self.arenas().push(arena);
+                arenas.last()
             }
         }
     }
 }
 impl HostDeviceConversions for FreeListAllocator {
     fn as_host_ptr(&self, allocation: NfPtr) -> Option<*const std::os::raw::c_void> {
-        let chunk = self.get_pointer_chunk(allocation)?;
-        chunk.as_host_ptr(allocation)
+        let arena = self.get_pointer_arena(allocation)?;
+        arena.as_host_ptr(allocation)
     }
     fn as_host_mut_ptr(&self, allocation: NfPtr) -> Option<*mut std::os::raw::c_void> {
-        let chunk = self.get_pointer_chunk(allocation)?;
-        chunk.as_host_mut_ptr(allocation)
+        let arena = self.get_pointer_arena(allocation)?;
+        arena.as_host_mut_ptr(allocation)
     }
     fn as_device_ptr(&self, allocation: NfPtr) -> Option<DevicePointer> {
-        let chunk = self.get_pointer_chunk(allocation)?;
-        chunk.as_device_ptr(allocation)
+        let arena = self.get_pointer_arena(allocation)?;
+        arena.as_device_ptr(allocation)
     }
 }
 impl GeneralAllocator for FreeListAllocator {
     fn allocate(&self, layout: Layout) -> Result<NfPtr, StarlitAllocError> {
-        let chunk = self.get_allocatable_chunk(layout).unwrap();
-        chunk.allocate(layout)
+        let arena = self.get_allocatable_arena(layout).unwrap();
+        arena.allocate(layout)
     }
     fn allocated(&self) -> usize {
-        self.chunks().iter().fold(0, |a, b|{ a + b.allocated() })
+        self.arenas().iter().fold(0, |a, b|{ a + b.allocated() })
     }
     fn size(&self) -> usize {
-        self.chunks().iter().fold(0, |a, b|{ a + b.size() })
+        self.arenas().iter().fold(0, |a, b|{ a + b.size() })
     }
     fn deallocate(&self, allocation: NfPtr, layout: Layout) -> Result<(), StarlitAllocError> {
-        let freelist = unsafe { self.get_pointer_chunk(allocation).unwrap().freelist.as_ptr().as_mut().unwrap() };
+        let freelist = unsafe { self.get_pointer_arena(allocation).unwrap().freelist.as_ptr().as_mut().unwrap() };
         freelist.free_inner(allocation.offset() as usize)
     }
     fn reallocate(&self, allocation: NfPtr, old_layout: Layout, new_layout: Layout) -> Result<NfPtr, StarlitAllocError> {
-        let chunk = self.get_pointer_chunk(allocation).unwrap();
-        if chunk.allocatable(new_layout) {
-            chunk.reallocate(allocation, old_layout, new_layout)
+        let arena = self.get_pointer_arena(allocation).unwrap();
+        if arena.allocatable(new_layout) {
+            arena.reallocate(allocation, old_layout, new_layout)
         } else {
-            let seperate_chunk = self.get_allocatable_chunk(new_layout).unwrap();
-            if let Some(ptr) = seperate_chunk.is_pointer_mappable(allocation) {
+            let seperate_arena = self.get_allocatable_arena(new_layout).unwrap();
+            if let Some(ptr) = seperate_arena.is_pointer_mappable(allocation) {
                 debug_assert!(
                     new_layout.size() >= old_layout.size(),
                     "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
                 );
-                let new_allocation = seperate_chunk.allocate(new_layout)?;
+                let new_allocation = seperate_arena.allocate(new_layout)?;
                 let old_offset = ptr.as_ptr() as usize + allocation.offset();
                 let new_offset = ptr.as_ptr() as usize + new_allocation.offset();
                 unsafe {
@@ -451,12 +451,11 @@ impl GeneralAllocator for FreeListAllocator {
         }
     }
     fn is_pointer_mappable(&self, allocation: NfPtr) -> Option<NonNull<std::os::raw::c_void>> {
-        let ptr = self.get_pointer_chunk(allocation)?;
+        let ptr = self.get_pointer_arena(allocation)?;
         ptr.is_pointer_mappable(allocation)
     }
     fn is_host_mappable(&self) -> bool {
-        let chunk = unsafe { self.chunks.as_ptr().as_mut().unwrap().get(0).unwrap() };
-        chunk.buffer.is_mappable()
+        self.is_mappable
     }
 }
 
